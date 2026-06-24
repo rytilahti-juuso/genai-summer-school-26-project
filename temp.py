@@ -14,6 +14,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import hdbscan
 
 MOCK_DATA_PATH = "test-data.parquet"
+REAL_DATA_PATH = "result.parquet"
 ENRICHED_DATA_PATH = "test-data-enriched.parquet"
 CLUSTER_KEYWORDS_PATH = "cluster-keywords.parquet"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -31,18 +32,31 @@ def create_mock_parquet(path: str = MOCK_DATA_PATH) -> pd.DataFrame:
 
 
 def load_arxiv_parquet(path: str = MOCK_DATA_PATH) -> pd.DataFrame:
-    """Load arXiv parquet data and keep DOI, title, and abstract columns."""
-    df = pd.read_parquet(path)
-    return (
+    """Load arXiv parquet data and drop rows with missing or empty required fields."""
+    df: pd.DataFrame = pd.read_parquet(path)
+
+    df = (
         df.rename(columns={"summary": "abstract"})
         .loc[:, ["id", "title", "abstract", "published"]]
         .copy()
     )
 
+    required_columns = ["id", "title", "abstract", "published"]
+
+    non_empty_mask = df[required_columns].notna().all(axis=1)
+
+    for column in required_columns:
+        if pd.api.types.is_string_dtype(df[column]) or df[column].dtype == object:
+            non_empty_mask &= df[column].astype("string").str.strip().ne("")
+
+    dropped_rows = len(df) - int(non_empty_mask.sum())
+    print(f"Dropped {dropped_rows} rows with missing or empty required fields.")
+
+    return df.loc[non_empty_mask].copy()
 
 def preprocess_text(text: str) -> str:
     """Clean text before embedding."""
-    text = text.lower()
+    text = str(text).lower()
     text = re.sub(r"\$[^$]*\$", " ", text)
     text = re.sub(r"[\*\#\`\_{}^\\]+", " ", text)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -232,9 +246,9 @@ def main(
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
 
-    create_mock_parquet(MOCK_DATA_PATH)
+    # create_mock_parquet(MOCK_DATA_PATH)
     print("start")
-    arxiv_df = load_arxiv_parquet(MOCK_DATA_PATH)
+    arxiv_df = load_arxiv_parquet(REAL_DATA_PATH)
     original_id_order = arxiv_df["id"].tolist()
     print("data has been loaded")
     arxiv_df = add_clean_text_and_embeddings(arxiv_df)
