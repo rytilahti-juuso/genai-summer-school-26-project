@@ -1,130 +1,175 @@
-import os
-import json
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-import umap
-import pandas as pd
-import re
-from sentence_transformers import SentenceTransformer
-import matplotlib.pyplot as plt
-OUTPUT_PATH = "final_load.parquet"
+from __future__ import annotations
 
-# Backup directory and backup frequency
-BACKUP_DIR = "backups"
-BACKUP_EVERY_N_CALLS = 50   # write a backup every N API calls
+import re
+from collections.abc import Sequence
+from typing import Literal
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pacmap
+import pandas as pd
+import umap
+from sentence_transformers import SentenceTransformer
+import hdbscan
+
+MOCK_DATA_PATH = "test-data.parquet"
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+RANDOM_STATE = 42
+from mockUpData import MOCK_ARXIV_RECORDS
+print(len(MOCK_ARXIV_RECORDS))
+ReducerName = Literal["umap", "pacmap"]
+
+
+def create_mock_parquet(path: str = MOCK_DATA_PATH) -> pd.DataFrame:
+    """Create the example arXiv entries as a parquet file."""
+    df = pd.DataFrame(MOCK_ARXIV_RECORDS)
+    df.to_parquet(path, index=False)
+    return df
+
+
+def load_arxiv_parquet(path: str = MOCK_DATA_PATH) -> pd.DataFrame:
+    """Load arXiv parquet data and keep DOI, title, and abstract columns."""
+    df = pd.read_parquet(path)
+    return (
+        df.rename(columns={"summary": "abstract"})
+        .loc[:, ["id", "title", "abstract", "published"]]
+        .copy()
+    )
 
 
 def preprocess_text(text: str) -> str:
-    """
-    Preprocess text by:
-      - Lowercasing
-      - Removing partial Markdown symbols (*, #, `, _)
-      - Collapsing multiple spaces to a single space
-    """
+    """Clean text before embedding."""
     text = text.lower()
-    text = re.sub(r'[\*\#\`\_]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-def save_backup(records: List[Dict[str, Any]], label: str) -> None:
-    """Write a backup CSV for results (including metadata_json)."""
-    if not records:
-        return
-
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"{label}_{ts}"
-
-    backup_main = os.path.join(BACKUP_DIR, f"{base}.parquet")
-    pd.DataFrame(records).to_parquet(backup_main)
-
-    print(f"[backup] Saved backup to {backup_main}")
+    text = re.sub(r"\$[^$]*\$", " ", text)
+    text = re.sub(r"[\*\#\`\_{}^\\]+", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[^a-z0-9.,;:()/%+\-\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
-def get_umap_reducer(n_components: int, n_neighbors: int, min_dist: float, random_state: int):
-    """
-    Returns a UMAP reducer with the specified parameters.
-    """
-    return umap.UMAP(
-        n_components=n_components,
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-        random_state=random_state
+def add_clean_text_and_embeddings(df: pd.DataFrame) -> pd.DataFrame:
+    """Add cleaned abstracts and sentence-transformer embeddings."""
+    model = SentenceTransformer(MODEL_NAME)
+    result = df.copy()
+    result["abstract_cleaned"] = result["abstract"].map(preprocess_text)
+    embeddings = model.encode(result["abstract_cleaned"].tolist(), show_progress_bar=False)
+    result["embedding"] = [embedding.astype(float).tolist() for embedding in embeddings]
+    return result
+
+
+def fit_reducers(
+    embeddings: np.ndarray, reducer_names: Sequence[ReducerName]
+) -> dict[str, np.ndarray]:
+    """Fit the selected reducers and return two-dimensional coordinates."""
+    n_samples = len(embeddings)
+    n_neighbors = max(2, min(3, n_samples - 1))
+    reductions = {}
+
+    if "pacmap" in reducer_names:
+        reductions["pacmap"] = pacmap.PaCMAP(
+            n_components=2,
+            n_neighbors=n_neighbors,
+            MN_ratio=0.5,
+            FP_ratio=1.0,
+            random_state=RANDOM_STATE,
+        ).fit_transform(embeddings)
+
+    if "umap" in reducer_names:
+        reductions["umap"] = umap.UMAP(
+            n_components=2,
+            n_neighbors=n_neighbors,
+            min_dist=0.1,
+            random_state=RANDOM_STATE,
+        ).fit_transform(embeddings)
+
+    return reductions
+
+
+def cluster_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    """Cluster embeddings with HDBSCAN."""
+    min_cluster_size = 2 if len(embeddings) < 10 else 5
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=1)
+    return clusterer.fit_predict(embeddings)
+
+
+def relative_timeline(df: pd.DataFrame) -> pd.Series:
+    """Scale publication dates from earliest 0.0 to latest 1.0."""
+    published = pd.to_datetime(df["published"], utc=True)
+    elapsed = (published - published.min()).dt.total_seconds()
+    total = elapsed.max()
+    return elapsed / total if total else elapsed
+
+
+def plot_reductions(df: pd.DataFrame, reductions: dict[str, np.ndarray]) -> None:
+    """Show selected reductions colored by cluster and relative timeline."""
+    labels = cluster_embeddings(np.vstack(df["embedding"].to_numpy()))
+    timeline = relative_timeline(df)
+
+    fig, axes = plt.subplots(
+        len(reductions),
+        2,
+        figsize=(14, 5 * len(reductions)),
+        constrained_layout=True,
+        squeeze=False,
     )
-
-
-def main():
-    all_records: List[Dict[str, Any]] = []
-    # Final save
-    if all_records:
-        pd.DataFrame(all_records).to_parquet(
-            OUTPUT_PATH,
+    plot_specs = []
+    for reducer_name in reductions:
+        display_name = reducer_name.upper() if reducer_name == "umap" else "PaCMAP"
+        plot_specs.extend(
+            [
+                (reducer_name, f"{display_name} HDBSCAN", labels, "tab10"),
+                (
+                    reducer_name,
+                    f"{display_name} relative timeline",
+                    timeline,
+                    "viridis",
+                ),
+            ]
         )
-        print(f"\nSaved final results (including metadata_json) to {OUTPUT_PATH}")
-    else:
-        print("\nNo records were generated.")
 
+    for ax, (reducer_name, title, colors, cmap) in zip(axes.flat, plot_specs):
+        coords = reductions[reducer_name]
+        scatter = ax.scatter(coords[:, 0], coords[:, 1], c=colors, cmap=cmap, s=110)
+        ax.set_title(title)
+        ax.set_xlabel("Dimension 1")
+        ax.set_ylabel("Dimension 2")
 
-    # ----------------------------------------
-    # 2) Embeddings
-    # ----------------------------------------
-    print("Loading model and embedding texts...")
-    model_name = "sentence-transformers/all-MiniLM-L6-v2"
-    model = SentenceTransformer(model_name)
-    sentences = ["This is an example sentence", "Each sentence is converted", "This is a test", "Very simple"]
-    embeddings = model.encode(sentences)
-    #print(embeddings)
-    umap_reducer = get_umap_reducer(min_dist=0.1,n_components=2,random_state=42,n_neighbors=2)
-    umap_result = umap_reducer.fit_transform(embeddings)
-    print(umap_result)
-    sentence_dict = {}
-    plt.figure(figsize=(24, 16))
-    plt.title(f"Semantic Similarity Visualization TEST")
-    plt.xlabel("Dimension 1")
-    plt.ylabel("Dimension 2")
+        for row, (x, y) in zip(df.itertuples(), coords):
+            ax.annotate(
+                row.title[:42],
+                (x, y),
+                xytext=(5, 5),
+                textcoords="offset points",
+                fontsize=8,
+            )
 
-    # Plot all sentence coordinates.
-    plt.scatter(
-        umap_result[:, 0],
-        umap_result[:, 1],
-        s=100,
-    )
-    
-    # Add each sentence as the label for its point.
-    for sentence, (x, y) in zip(sentences, umap_result):
-        plt.annotate(
-            sentence,
-            xy=(x, y),
-            xytext=(8, 8),
-            textcoords="offset points",
-            fontsize=10,
-            bbox={
-                "boxstyle": "round,pad=0.3",
-                "alpha": 0.7,
-            },
-            arrowprops={
-                "arrowstyle": "-",
-                "alpha": 0.5,
-            },
-        )
-    plt.tight_layout()
+        if "timeline" in title:
+            fig.colorbar(scatter, ax=ax, label="Relative publication date")
+
     plt.show()
-                
-    
 
-            
-            
+
+def main(reducer_names: Sequence[ReducerName]) -> None:
+    if not reducer_names:
+        raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
+
+    create_mock_parquet(MOCK_DATA_PATH)
+    print("start")
+    arxiv_df = load_arxiv_parquet(MOCK_DATA_PATH)
+    print("data has been loaded")
+    arxiv_df = add_clean_text_and_embeddings(arxiv_df)
+    print("data has been cleaned")
+    embeddings = np.vstack(arxiv_df["embedding"].to_numpy())
+    print("embeddings have been done")
+    reductions = fit_reducers(embeddings, reducer_names)
+
+    print(f"Created {MOCK_DATA_PATH} with {len(MOCK_ARXIV_RECORDS)} rows.")
+    print(arxiv_df[["id", "title", "abstract_cleaned"]])
+
+    plot_reductions(arxiv_df, reductions)
+
+
 if __name__ == "__main__":
-    main()
-
-    """
-                if overlaps:
-                    plt.scatter(
-                        points_2d[overlaps, 0],
-                        points_2d[overlaps, 1],
-                        color="black",
-                        marker="x",
-                        s=150,
-                        label=f"{tag} Overlap"
-                    )
-                """
+    # Select ("umap",), ("pacmap",), or ("umap", "pacmap").
+    main(("umap"))
