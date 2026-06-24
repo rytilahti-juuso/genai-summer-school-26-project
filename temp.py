@@ -13,6 +13,7 @@ from sentence_transformers import SentenceTransformer
 import hdbscan
 
 MOCK_DATA_PATH = "test-data.parquet"
+ENRICHED_DATA_PATH = "test-data-enriched.parquet"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RANDOM_STATE = 42
 from mockUpData import MOCK_ARXIV_RECORDS
@@ -101,10 +102,29 @@ def relative_timeline(df: pd.DataFrame) -> pd.Series:
     return elapsed / total if total else elapsed
 
 
+def add_predictions(
+    df: pd.DataFrame, reductions: dict[str, np.ndarray]
+) -> pd.DataFrame:
+    """Add labels, timeline, and reducer coordinates without changing row order."""
+    result = df.copy()
+    embeddings = np.vstack(result["embedding"].to_numpy())
+
+    result["predicted_label"] = cluster_embeddings(embeddings)
+    result["relative_timeline"] = relative_timeline(result).to_numpy()
+
+    for reducer_name, coordinates in reductions.items():
+        result[f"{reducer_name}_x"] = coordinates[:, 0]
+        result[f"{reducer_name}_y"] = coordinates[:, 1]
+
+    return result
+
+
 def plot_reductions(df: pd.DataFrame, reductions: dict[str, np.ndarray]) -> None:
     """Show selected reductions colored by cluster and relative timeline."""
-    labels = cluster_embeddings(np.vstack(df["embedding"].to_numpy()))
-    timeline = relative_timeline(df)
+    labels = df["predicted_label"]
+    print("labels are:")
+    print(labels.to_numpy())
+    timeline = df["relative_timeline"]
 
     fig, axes = plt.subplots(
         len(reductions),
@@ -150,26 +170,37 @@ def plot_reductions(df: pd.DataFrame, reductions: dict[str, np.ndarray]) -> None
     plt.show()
 
 
-def main(reducer_names: Sequence[ReducerName]) -> None:
+def main(
+    reducer_names: Sequence[ReducerName],
+    output_path: str = ENRICHED_DATA_PATH,
+) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
 
     create_mock_parquet(MOCK_DATA_PATH)
     print("start")
     arxiv_df = load_arxiv_parquet(MOCK_DATA_PATH)
+    original_id_order = arxiv_df["id"].tolist()
     print("data has been loaded")
     arxiv_df = add_clean_text_and_embeddings(arxiv_df)
     print("data has been cleaned")
     embeddings = np.vstack(arxiv_df["embedding"].to_numpy())
     print("embeddings have been done")
     reductions = fit_reducers(embeddings, reducer_names)
+    arxiv_df = add_predictions(arxiv_df, reductions)
+
+    if arxiv_df["id"].tolist() != original_id_order:
+        raise RuntimeError("Row order changed while enriching the data.")
+
+    arxiv_df.to_parquet(output_path, index=False)
+    print(f"Saved enriched data to {output_path} with row order preserved.")
 
     print(f"Created {MOCK_DATA_PATH} with {len(MOCK_ARXIV_RECORDS)} rows.")
-    print(arxiv_df[["id", "title", "abstract_cleaned"]])
+    print(arxiv_df[["id", "title", "abstract_cleaned", "predicted_label"]])
 
     plot_reductions(arxiv_df, reductions)
 
 
 if __name__ == "__main__":
     # Select ("umap",), ("pacmap",), or ("umap", "pacmap").
-    main(("umap"))
+    main(("umap",), output_path="test-data-enriched.parquet")
