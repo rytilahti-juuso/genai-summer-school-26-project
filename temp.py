@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pacmap
 import pandas as pd
+import plotly.express as px
 import umap
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -17,6 +18,7 @@ MOCK_DATA_PATH = "test-data.parquet"
 REAL_DATA_PATH = "result.parquet"
 ENRICHED_DATA_PATH = "test-data-enriched.parquet"
 CLUSTER_KEYWORDS_PATH = "cluster-keywords.parquet"
+INTERACTIVE_PLOTS_DIR = "interactive-plots"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RANDOM_STATE = 42
 from mockUpData import MOCK_ARXIV_RECORDS
@@ -187,61 +189,84 @@ def extract_cluster_keywords(
     )
 
 
-def plot_reductions(df: pd.DataFrame, reductions: dict[str, np.ndarray]) -> None:
-    """Show selected reductions colored by cluster and relative timeline."""
-    labels = df["predicted_label"]
-    print("labels are:")
-    print(labels.to_numpy())
-    timeline = df["relative_timeline"]
+def save_interactive_reductions(
+    df: pd.DataFrame,
+    reductions: dict[str, np.ndarray],
+    output_dir: str | Path = INTERACTIVE_PLOTS_DIR,
+) -> list[Path]:
+    """Save uncluttered reductions as individual HTML files with hover details."""
+    output_directory = Path(output_dir)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
 
-    fig, axes = plt.subplots(
-        len(reductions),
-        2,
-        figsize=(14, 5 * len(reductions)),
-        constrained_layout=True,
-        squeeze=False,
-    )
-    plot_specs = []
-    for reducer_name in reductions:
+    hover_data = {
+        "id": True,
+        "published": True,
+        "predicted_label": True,
+        "relative_timeline": ":.3f",
+        "Dimension 1": ":.3f",
+        "Dimension 2": ":.3f",
+    }
+
+    for reducer_name, coordinates in reductions.items():
         display_name = reducer_name.upper() if reducer_name == "umap" else "PaCMAP"
-        plot_specs.extend(
-            [
-                (reducer_name, f"{display_name} HDBSCAN", labels, "tab10"),
-                (
-                    reducer_name,
-                    f"{display_name} relative timeline",
-                    timeline,
-                    "viridis",
-                ),
-            ]
+        plot_df = df.copy()
+        plot_df["Dimension 1"] = coordinates[:, 0]
+        plot_df["Dimension 2"] = coordinates[:, 1]
+        # Treat cluster IDs as categories, including HDBSCAN's -1 noise label.
+        plot_df["cluster"] = plot_df["predicted_label"].map(
+            lambda label: "Noise" if label == -1 else f"Cluster {label}"
         )
 
-    for ax, (reducer_name, title, colors, cmap) in zip(axes.flat, plot_specs):
-        coords = reductions[reducer_name]
-        scatter = ax.scatter(coords[:, 0], coords[:, 1], c=colors, cmap=cmap, s=110)
-        ax.set_title(title)
-        ax.set_xlabel("Dimension 1")
-        ax.set_ylabel("Dimension 2")
+        cluster_figure = px.scatter(
+            plot_df,
+            x="Dimension 1",
+            y="Dimension 2",
+            color="cluster",
+            hover_name="title",
+            hover_data=hover_data,
+            title=f"{display_name} HDBSCAN clusters",
+            labels={"cluster": "Cluster"},
+            template="plotly_white",
+        )
+        cluster_figure.update_traces(marker={"size": 10, "opacity": 0.82})
 
-        for row, (x, y) in zip(df.itertuples(), coords):
-            ax.annotate(
-                row.title[:42],
-                (x, y),
-                xytext=(5, 5),
-                textcoords="offset points",
-                fontsize=8,
+        timeline_figure = px.scatter(
+            plot_df,
+            x="Dimension 1",
+            y="Dimension 2",
+            color="relative_timeline",
+            color_continuous_scale="Viridis",
+            hover_name="title",
+            hover_data=hover_data,
+            title=f"{display_name} relative publication timeline",
+            labels={"relative_timeline": "Relative publication date"},
+            template="plotly_white",
+        )
+        timeline_figure.update_traces(marker={"size": 10, "opacity": 0.82})
+
+        for suffix, figure in (
+            ("clusters", cluster_figure),
+            ("timeline", timeline_figure),
+        ):
+            figure.update_layout(hoverlabel={"namelength": -1})
+            output_path = output_directory / f"{reducer_name}-{suffix}.html"
+            figure.write_html(
+                output_path,
+                include_plotlyjs=True,
+                full_html=True,
+                config={"displaylogo": False, "scrollZoom": True},
             )
+            saved_paths.append(output_path)
 
-        if "timeline" in title:
-            fig.colorbar(scatter, ax=ax, label="Relative publication date")
-
-    plt.show()
+    return saved_paths
 
 
 def main(
     reducer_names: Sequence[ReducerName],
     output_path: str = ENRICHED_DATA_PATH,
     cluster_keywords_path: str = CLUSTER_KEYWORDS_PATH,
+    interactive_plots_dir: str | Path = INTERACTIVE_PLOTS_DIR,
 ) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
@@ -270,7 +295,13 @@ def main(
     print(f"Created {MOCK_DATA_PATH} with {len(MOCK_ARXIV_RECORDS)} rows.")
     print(arxiv_df[["id", "title", "abstract_cleaned", "predicted_label"]])
 
-    plot_reductions(arxiv_df, reductions)
+    plot_paths = save_interactive_reductions(
+        arxiv_df,
+        reductions,
+        output_dir=interactive_plots_dir,
+    )
+    for plot_path in plot_paths:
+        print(f"Saved interactive plot to {plot_path}.")
 
 
 if __name__ == "__main__":
