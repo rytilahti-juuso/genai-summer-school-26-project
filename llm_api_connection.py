@@ -10,7 +10,7 @@ class LLM_connection:
         self.api_key = api_key
         self.url = 'https://llm.tt.utu.fi/api/generate'
 
-    def invoke(self, data, prompt_text):
+    def invoke(self, prompt_text):
         
         prompt = prompt_text
         url = self.url
@@ -30,4 +30,4 @@ class LLM_connection:
         }
 
         response = requests.post(self.url, headers=headers, json=payload)
-        return response.json()["response"][0]
+        return response.json()["response"]
