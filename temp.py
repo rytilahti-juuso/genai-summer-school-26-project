@@ -21,6 +21,7 @@ CLUSTER_KEYWORDS_PATH = "cluster-keywords.parquet"
 INTERACTIVE_PLOTS_DIR = "interactive-plots"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RANDOM_STATE = 42
+OLDER_OUTLIER_COLOR = "#B5485D"
 from mockUpData import MOCK_ARXIV_RECORDS
 print(len(MOCK_ARXIV_RECORDS))
 ReducerName = Literal["umap", "pacmap"]
@@ -112,12 +113,51 @@ def cluster_embeddings(embeddings: np.ndarray) -> np.ndarray:
     return clusterer.fit_predict(embeddings)
 
 
+def publication_timeline_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Grade dates from the 5th percentile through newest and flag older records."""
+    published = pd.to_datetime(df["published"], utc=True, errors="coerce")
+    valid_published = published.dropna()
+
+    timeline_grade = pd.Series(np.nan, index=df.index, dtype=float)
+    older_outlier = pd.Series(False, index=df.index, dtype=bool)
+    timeline_status = pd.Series(
+        "Publication date unavailable", index=df.index, dtype="string"
+    )
+
+    if not valid_published.empty:
+        gradient_start = valid_published.quantile(0.05)
+        newest_publication = valid_published.max()
+        grading_range_seconds = (
+            newest_publication - gradient_start
+        ).total_seconds()
+
+        if grading_range_seconds:
+            timeline_grade = (
+                (published - gradient_start).dt.total_seconds()
+                / grading_range_seconds
+            ).clip(0.0, 1.0)
+        else:
+            timeline_grade.loc[published.notna()] = 0.5
+
+        older_outlier = published.lt(gradient_start).fillna(False)
+        timeline_status.loc[published.notna()] = "Within timeline grading"
+        timeline_status.loc[older_outlier] = (
+            "Older outlier (lowest 5% excluded from gradient)"
+        )
+
+    return pd.DataFrame(
+        {
+            "relative_timeline": timeline_grade,
+            "timeline_outlier": older_outlier,
+            "timeline_status": timeline_status,
+        },
+        index=df.index,
+    )
+
+
 def relative_timeline(df: pd.DataFrame) -> pd.Series:
-    """Scale publication dates from earliest 0.0 to latest 1.0."""
-    published = pd.to_datetime(df["published"], utc=True)
-    elapsed = (published - published.min()).dt.total_seconds()
-    total = elapsed.max()
-    return elapsed / total if total else elapsed
+    """Scale publication dates from the 5th percentile to newest."""
+    return publication_timeline_metadata(df)["relative_timeline"]
 
 
 def add_predictions(
@@ -128,7 +168,9 @@ def add_predictions(
     embeddings = np.vstack(result["embedding"].to_numpy())
 
     result["predicted_label"] = cluster_embeddings(embeddings)
-    result["relative_timeline"] = relative_timeline(result).to_numpy()
+    timeline_metadata = publication_timeline_metadata(result)
+    for column in timeline_metadata.columns:
+        result[column] = timeline_metadata[column].to_numpy()
 
     for reducer_name, coordinates in reductions.items():
         result[f"{reducer_name}_x"] = coordinates[:, 0]
@@ -207,6 +249,11 @@ def save_interactive_reductions(
         "Dimension 1": ":.3f",
         "Dimension 2": ":.3f",
     }
+    timeline_hover_data = {
+        **hover_data,
+        "timeline_status": True,
+        "timeline_outlier": False,
+    }
 
     for reducer_name, coordinates in reductions.items():
         display_name = reducer_name.upper() if reducer_name == "umap" else "PaCMAP"
@@ -232,18 +279,44 @@ def save_interactive_reductions(
         cluster_figure.update_traces(marker={"size": 10, "opacity": 0.82})
 
         timeline_figure = px.scatter(
-            plot_df,
+            plot_df.loc[~plot_df["timeline_outlier"]],
             x="Dimension 1",
             y="Dimension 2",
             color="relative_timeline",
             color_continuous_scale="Viridis",
+            range_color=(0.0, 1.0),
             hover_name="title",
-            hover_data=hover_data,
-            title=f"{display_name} relative publication timeline",
-            labels={"relative_timeline": "Relative publication date"},
+            hover_data=timeline_hover_data,
+            title=f"{display_name} publication timeline (5th percentile to newest)",
+            labels={
+                "relative_timeline": "Publication date (5th percentile to newest)",
+                "timeline_status": "Timeline status",
+            },
             template="plotly_white",
         )
         timeline_figure.update_traces(marker={"size": 10, "opacity": 0.82})
+
+        older_outliers = plot_df.loc[plot_df["timeline_outlier"]]
+        if not older_outliers.empty:
+            outlier_figure = px.scatter(
+                older_outliers,
+                x="Dimension 1",
+                y="Dimension 2",
+                hover_name="title",
+                hover_data=timeline_hover_data,
+                labels={"timeline_status": "Timeline status"},
+            )
+            outlier_figure.update_traces(
+                marker={
+                    "size": 10,
+                    "opacity": 0.9,
+                    "color": OLDER_OUTLIER_COLOR,
+                    "line": {"color": "white", "width": 0.7},
+                },
+                name="Older outlier",
+                showlegend=True,
+            )
+            timeline_figure.add_traces(outlier_figure.data)
 
         for suffix, figure in (
             ("clusters", cluster_figure),
