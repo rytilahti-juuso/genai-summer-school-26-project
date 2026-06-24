@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,13 +10,14 @@ import numpy as np
 import pacmap
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import umap
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 import hdbscan
 
 MOCK_DATA_PATH = "test-data.parquet"
-REAL_DATA_PATH = "result.parquet"
+REAL_DATA_PATH = "result*.parquet"
 ENRICHED_DATA_PATH = "test-data-enriched.parquet"
 CLUSTER_KEYWORDS_PATH = "cluster-keywords.parquet"
 INTERACTIVE_PLOTS_DIR = "interactive-plots"
@@ -36,7 +38,20 @@ def create_mock_parquet(path: str = MOCK_DATA_PATH) -> pd.DataFrame:
 
 def load_arxiv_parquet(path: str = MOCK_DATA_PATH) -> pd.DataFrame:
     """Load arXiv parquet data and drop rows with missing or empty required fields."""
-    df: pd.DataFrame = pd.read_parquet(path)
+    parquet_paths = [Path(match) for match in glob.glob(path)]
+    if not parquet_paths:
+        raise FileNotFoundError(f"No parquet files matched: {path}")
+
+    def result_file_order(parquet_path: Path) -> tuple[int, str]:
+        match = re.search(r"(\d+)$", parquet_path.stem)
+        numeric_suffix = int(match.group(1)) if match else -1
+        return numeric_suffix, parquet_path.name
+
+    parquet_paths.sort(key=result_file_order)
+    df = pd.concat(
+        [pd.read_parquet(parquet_path) for parquet_path in parquet_paths],
+        ignore_index=True,
+    )
 
     df = (
         df.rename(columns={"summary": "abstract"})
@@ -279,6 +294,243 @@ def extract_cluster_keywords(
     )
 
 
+def calculate_monthly_cluster_trends(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Aggregate monthly cluster counts and calculate linear growth rates."""
+    required_columns = {"published", "predicted_label"}
+    missing_columns = required_columns.difference(df.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Missing required columns: {missing}")
+
+    prepared = pd.DataFrame(
+        {
+            "published": pd.to_datetime(
+                df["published"], utc=True, errors="coerce"
+            ),
+            "predicted_label": pd.to_numeric(
+                df["predicted_label"], errors="coerce"
+            ),
+        }
+    )
+    valid_dates = prepared["published"].dropna()
+    cluster_rows = prepared.loc[
+        prepared["published"].notna()
+        & prepared["predicted_label"].notna()
+        & prepared["predicted_label"].ge(0)
+    ].copy()
+
+    monthly_columns = [
+        "month",
+        "month_index",
+        "predicted_label",
+        "cluster",
+        "item_count",
+        "regression_count",
+        "growth_items_per_month",
+        "growth_percent_per_month",
+    ]
+    statistics_columns = [
+        "predicted_label",
+        "cluster",
+        "growth_items_per_month",
+        "growth_percent_per_month",
+        "mean_monthly_count",
+        "regression_intercept",
+        "month_count",
+    ]
+    if valid_dates.empty or cluster_rows.empty:
+        return (
+            pd.DataFrame(columns=monthly_columns),
+            pd.DataFrame(columns=statistics_columns),
+        )
+
+    first_month = valid_dates.min().to_period("M")
+    last_month = valid_dates.max().to_period("M")
+    months = pd.period_range(first_month, last_month, freq="M")
+    labels = sorted(cluster_rows["predicted_label"].astype(int).unique())
+
+    cluster_rows["predicted_label"] = cluster_rows["predicted_label"].astype(int)
+    cluster_rows["month_period"] = cluster_rows["published"].dt.to_period("M")
+    observed_counts = cluster_rows.groupby(
+        ["month_period", "predicted_label"]
+    ).size()
+    complete_index = pd.MultiIndex.from_product(
+        [months, labels],
+        names=["month_period", "predicted_label"],
+    )
+    monthly = (
+        observed_counts.reindex(complete_index, fill_value=0)
+        .rename("item_count")
+        .reset_index()
+    )
+    monthly["month"] = monthly["month_period"].dt.to_timestamp()
+    month_positions = {month: index for index, month in enumerate(months)}
+    monthly["month_index"] = monthly["month_period"].map(month_positions).astype(int)
+    monthly["cluster"] = monthly["predicted_label"].map(
+        lambda label: f"Cluster {label}"
+    )
+
+    statistics = []
+    fitted_groups = []
+    for label, cluster_months in monthly.groupby(
+        "predicted_label", sort=True
+    ):
+        cluster_months = cluster_months.copy()
+        x = cluster_months["month_index"].to_numpy(dtype=float)
+        y = cluster_months["item_count"].to_numpy(dtype=float)
+
+        if len(cluster_months) == 1:
+            slope = 0.0
+            intercept = float(y[0])
+        else:
+            slope, intercept = np.polyfit(x, y, 1)
+
+        mean_count = float(y.mean())
+        growth_percent = (
+            float(100.0 * slope / mean_count) if mean_count > 0 else np.nan
+        )
+        fitted = intercept + slope * x
+        cluster_name = f"Cluster {label}"
+
+        cluster_months["regression_count"] = fitted
+        cluster_months["growth_items_per_month"] = float(slope)
+        cluster_months["growth_percent_per_month"] = growth_percent
+        fitted_groups.append(cluster_months)
+        statistics.append(
+            {
+                "predicted_label": int(label),
+                "cluster": cluster_name,
+                "growth_items_per_month": float(slope),
+                "growth_percent_per_month": growth_percent,
+                "mean_monthly_count": mean_count,
+                "regression_intercept": float(intercept),
+                "month_count": len(cluster_months),
+            }
+        )
+
+    monthly_result = pd.concat(fitted_groups, ignore_index=True)
+    monthly_result = monthly_result.loc[:, monthly_columns]
+    statistics_result = pd.DataFrame(statistics, columns=statistics_columns)
+    return monthly_result, statistics_result
+
+
+def create_cluster_trends_figure(
+    monthly_trends: pd.DataFrame,
+    growth_statistics: pd.DataFrame,
+) -> go.Figure:
+    """Create a shared Plotly chart for monthly cluster counts and trends."""
+    figure = go.Figure()
+    colors = px.colors.qualitative.Plotly
+
+    for color_index, statistics in growth_statistics.iterrows():
+        label = int(statistics["predicted_label"])
+        cluster_name = str(statistics["cluster"])
+        cluster_months = monthly_trends.loc[
+            monthly_trends["predicted_label"].eq(label)
+        ].sort_values("month")
+        color = colors[color_index % len(colors)]
+        slope = float(statistics["growth_items_per_month"])
+        growth_percent = float(statistics["growth_percent_per_month"])
+        growth_label = (
+            f"{slope:+.3f} items/month, "
+            f"{growth_percent:+.2f}%/month"
+        )
+        custom_data = np.column_stack(
+            [
+                np.full(len(cluster_months), slope),
+                np.full(len(cluster_months), growth_percent),
+            ]
+        )
+
+        figure.add_trace(
+            go.Scatter(
+                x=cluster_months["month"],
+                y=cluster_months["item_count"],
+                mode="lines+markers",
+                name=cluster_name,
+                legendgroup=cluster_name,
+                line={"color": color, "width": 2},
+                marker={"color": color, "size": 6},
+                customdata=custom_data,
+                hovertemplate=(
+                    f"<b>{cluster_name}</b><br>"
+                    "Month: %{x|%Y-%m}<br>"
+                    "Items: %{y:.0f}<br>"
+                    "Growth: %{customdata[0]:+.3f} items/month<br>"
+                    "Growth: %{customdata[1]:+.2f}%/month"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=cluster_months["month"],
+                y=cluster_months["regression_count"],
+                mode="lines",
+                name=f"{cluster_name} trend ({growth_label})",
+                legendgroup=cluster_name,
+                line={"color": color, "width": 2, "dash": "dash"},
+                customdata=custom_data,
+                hovertemplate=(
+                    f"<b>{cluster_name} linear trend</b><br>"
+                    "Month: %{x|%Y-%m}<br>"
+                    "Fitted items: %{y:.2f}<br>"
+                    "Growth: %{customdata[0]:+.3f} items/month<br>"
+                    "Growth: %{customdata[1]:+.2f}%/month"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    figure.update_layout(
+        title="Monthly item trends by cluster",
+        xaxis_title="Publication month",
+        yaxis_title="Number of items",
+        template="plotly_white",
+        hovermode="x unified",
+        hoverlabel={"namelength": -1},
+        legend={"title": {"text": "Clusters and linear trends"}},
+    )
+    figure.update_xaxes(type="date")
+    figure.update_yaxes(rangemode="tozero")
+
+    if growth_statistics.empty:
+        figure.add_annotation(
+            text="No valid numbered cluster data is available.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+
+    return figure
+
+
+def save_cluster_trends(
+    df: pd.DataFrame,
+    output_dir: str | Path = INTERACTIVE_PLOTS_DIR,
+) -> Path:
+    """Calculate and save the interactive monthly cluster trend chart."""
+    output_directory = Path(output_dir)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    monthly_trends, growth_statistics = calculate_monthly_cluster_trends(df)
+    figure = create_cluster_trends_figure(
+        monthly_trends,
+        growth_statistics,
+    )
+    output_path = output_directory / "cluster-trends.html"
+    figure.write_html(
+        output_path,
+        include_plotlyjs=True,
+        full_html=True,
+        config={"displaylogo": False, "scrollZoom": True},
+    )
+    return output_path
+
+
 def save_interactive_reductions(
     df: pd.DataFrame,
     reductions: dict[str, np.ndarray],
@@ -440,6 +692,12 @@ def main(
         arxiv_df,
         reductions,
         output_dir=interactive_plots_dir,
+    )
+    plot_paths.append(
+        save_cluster_trends(
+            arxiv_df,
+            output_dir=interactive_plots_dir,
+        )
     )
     for plot_path in plot_paths:
         print(f"Saved interactive plot to {plot_path}.")
