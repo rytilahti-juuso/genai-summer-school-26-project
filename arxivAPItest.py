@@ -5,7 +5,7 @@ import time
 from io import StringIO
 
 base_url = 'http://export.arxiv.org/api/query?';
-search_query = urllib.parse.quote("ti:computer science")
+search_query = urllib.parse.quote("ti:computers and society")
 i = 0
 results_per_iteration = 1000
 wait_time = 5
@@ -16,11 +16,7 @@ print('Searching arXiv for %s' % search_query)
 while (year != "2025"): #stop requesting when papers date reach 2018
    print("Results %i - %i" % (i,i+results_per_iteration))
     
-   query = 'search_query=%s&start=%i&max_results=%i&sortBy=submittedDate&sortOrder=descending' % (search_query,
-                                                         i,
-                                                         results_per_iteration)
-
-    # perform a GET request using the base_url and query
+   query = 'search_query=%s&start=%i&max_results=%i&sortBy=submittedDate&sortOrder=descending' % (search_query, i,results_per_iteration)
    data = urllib.request.urlopen(base_url+query)
    result = data.read().decode('utf-8', 'ignore')
    i += results_per_iteration
