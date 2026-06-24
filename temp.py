@@ -78,6 +78,38 @@ def add_clean_text_and_embeddings(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def add_reduced_embeddings(
+    df: pd.DataFrame,
+    n_components: int,
+    source_column: str = "embedding",
+    output_column: str = "reduced_embedding",
+) -> pd.DataFrame:
+    """Apply UMAP to stored embeddings and save the reduced vectors."""
+    result = df.copy()
+    embeddings = np.vstack(result[source_column].to_numpy())
+    n_samples, n_features = embeddings.shape
+    maximum_components = min(n_samples - 2, n_features - 1)
+
+    if not 1 <= n_components <= maximum_components:
+        raise ValueError(
+            "UMAP dimensions must be at least 1, lower than the original "
+            f"embedding size, and at least two below the sample count; received "
+            f"{n_components}, maximum allowed is {maximum_components}."
+        )
+
+    n_neighbors = max(2, min(15, n_samples - 1))
+    reduced_embeddings = umap.UMAP(
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        metric="cosine",
+        random_state=RANDOM_STATE,
+    ).fit_transform(embeddings)
+    result[output_column] = [
+        embedding.astype(float).tolist() for embedding in reduced_embeddings
+    ]
+    return result
+
+
 def fit_reducers(
     embeddings: np.ndarray, reducer_names: Sequence[ReducerName]
 ) -> dict[str, np.ndarray]:
@@ -161,11 +193,13 @@ def relative_timeline(df: pd.DataFrame) -> pd.Series:
 
 
 def add_predictions(
-    df: pd.DataFrame, reductions: dict[str, np.ndarray]
+    df: pd.DataFrame,
+    reductions: dict[str, np.ndarray],
+    embedding_column: str = "embedding",
 ) -> pd.DataFrame:
     """Add labels, timeline, and reducer coordinates without changing row order."""
     result = df.copy()
-    embeddings = np.vstack(result["embedding"].to_numpy())
+    embeddings = np.vstack(result[embedding_column].to_numpy())
 
     result["predicted_label"] = cluster_embeddings(embeddings)
     timeline_metadata = publication_timeline_metadata(result)
@@ -340,6 +374,7 @@ def main(
     output_path: str = ENRICHED_DATA_PATH,
     cluster_keywords_path: str = CLUSTER_KEYWORDS_PATH,
     interactive_plots_dir: str | Path = INTERACTIVE_PLOTS_DIR,
+    embedding_reduction_dimensions: int | None = None,
 ) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
@@ -351,10 +386,27 @@ def main(
     print("data has been loaded")
     arxiv_df = add_clean_text_and_embeddings(arxiv_df)
     print("data has been cleaned")
-    embeddings = np.vstack(arxiv_df["embedding"].to_numpy())
     print("embeddings have been done")
+
+    embedding_column = "embedding"
+    if embedding_reduction_dimensions is not None:
+        arxiv_df = add_reduced_embeddings(
+            arxiv_df,
+            n_components=embedding_reduction_dimensions,
+        )
+        embedding_column = "reduced_embedding"
+        print(
+            "Reduced embeddings with UMAP to "
+            f"{embedding_reduction_dimensions} dimensions."
+        )
+
+    embeddings = np.vstack(arxiv_df[embedding_column].to_numpy())
     reductions = fit_reducers(embeddings, reducer_names)
-    arxiv_df = add_predictions(arxiv_df, reductions)
+    arxiv_df = add_predictions(
+        arxiv_df,
+        reductions,
+        embedding_column=embedding_column,
+    )
     cluster_keywords_df = extract_cluster_keywords(arxiv_df)
 
     if arxiv_df["id"].tolist() != original_id_order:
@@ -379,8 +431,11 @@ def main(
 
 if __name__ == "__main__":
     # Select ("umap",), ("pacmap",), or ("umap", "pacmap").
+    # Set embedding_reduction_dimensions to an integer (for example, 50)
+    # to apply UMAP before clustering and visualization; use None to disable it.
     main(
         ("umap",),
         output_path="test-data-enriched.parquet",
         cluster_keywords_path="cluster-keywords.parquet",
+        embedding_reduction_dimensions=8,
     )
