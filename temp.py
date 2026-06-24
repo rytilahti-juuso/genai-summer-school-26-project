@@ -169,8 +169,9 @@ def fit_reducers(
 
 def cluster_embeddings(embeddings: np.ndarray) -> np.ndarray:
     """Cluster embeddings with HDBSCAN."""
-    min_cluster_size = 2 if len(embeddings) < 10 else 5
-    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=1)
+    # min_cluster_size = 2 if len(embeddings) < 10 else 5
+    min_cluster_size = 350
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=None)
     return clusterer.fit_predict(embeddings)
 
 
@@ -243,7 +244,7 @@ def add_predictions(
 
 
 def extract_cluster_keywords(
-    df: pd.DataFrame, top_n: int = 5
+    df: pd.DataFrame, top_n: int = 8
 ) -> pd.DataFrame:
     """Find each cluster's top TF-IDF words and documents containing them."""
     records = []
@@ -710,8 +711,8 @@ if __name__ == "__main__":
     # Use embedding_reduction_dimensions=None to disable this preprocessing.
     main(
         ("umap", "pacmap"),
-        output_path="test-data-enriched.parquet",
-        cluster_keywords_path="cluster-keywords.parquet",
+        output_path="final-data-enriched.parquet",
+        cluster_keywords_path="final-data-cluster-keywords.parquet",
         embedding_reduction_dimensions=8,
         embedding_reduction_method="pacmap",
     )
