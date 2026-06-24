@@ -10,10 +10,12 @@ import pacmap
 import pandas as pd
 import umap
 from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 import hdbscan
 
 MOCK_DATA_PATH = "test-data.parquet"
 ENRICHED_DATA_PATH = "test-data-enriched.parquet"
+CLUSTER_KEYWORDS_PATH = "cluster-keywords.parquet"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RANDOM_STATE = 42
 from mockUpData import MOCK_ARXIV_RECORDS
@@ -119,6 +121,58 @@ def add_predictions(
     return result
 
 
+def extract_cluster_keywords(
+    df: pd.DataFrame, top_n: int = 5
+) -> pd.DataFrame:
+    """Find each cluster's top TF-IDF words and documents containing them."""
+    records = []
+
+    for cluster_label, cluster_df in df.groupby(
+        "predicted_label", sort=False, dropna=False
+    ):
+        documents = cluster_df["abstract_cleaned"].fillna("").tolist()
+        vectorizer = TfidfVectorizer(stop_words="english")
+
+        try:
+            tfidf_matrix = vectorizer.fit_transform(documents)
+        except ValueError:
+            continue
+
+        terms = vectorizer.get_feature_names_out()
+        cluster_scores = np.asarray(tfidf_matrix.mean(axis=0)).ravel()
+        top_indices = cluster_scores.argsort()[::-1][:top_n]
+
+        for rank, term_index in enumerate(top_indices, start=1):
+            if cluster_scores[term_index] <= 0:
+                continue
+
+            matching_rows = tfidf_matrix[:, term_index].nonzero()[0]
+            document_ids = cluster_df.iloc[matching_rows]["id"].tolist()
+
+            records.append(
+                {
+                    "predicted_label": int(cluster_label),
+                    "rank": rank,
+                    "word": terms[term_index],
+                    "mean_tfidf_score": float(cluster_scores[term_index]),
+                    "document_count": len(document_ids),
+                    "document_ids": document_ids,
+                }
+            )
+
+    return pd.DataFrame(
+        records,
+        columns=[
+            "predicted_label",
+            "rank",
+            "word",
+            "mean_tfidf_score",
+            "document_count",
+            "document_ids",
+        ],
+    )
+
+
 def plot_reductions(df: pd.DataFrame, reductions: dict[str, np.ndarray]) -> None:
     """Show selected reductions colored by cluster and relative timeline."""
     labels = df["predicted_label"]
@@ -173,6 +227,7 @@ def plot_reductions(df: pd.DataFrame, reductions: dict[str, np.ndarray]) -> None
 def main(
     reducer_names: Sequence[ReducerName],
     output_path: str = ENRICHED_DATA_PATH,
+    cluster_keywords_path: str = CLUSTER_KEYWORDS_PATH,
 ) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
@@ -188,12 +243,15 @@ def main(
     print("embeddings have been done")
     reductions = fit_reducers(embeddings, reducer_names)
     arxiv_df = add_predictions(arxiv_df, reductions)
+    cluster_keywords_df = extract_cluster_keywords(arxiv_df)
 
     if arxiv_df["id"].tolist() != original_id_order:
         raise RuntimeError("Row order changed while enriching the data.")
 
     arxiv_df.to_parquet(output_path, index=False)
+    cluster_keywords_df.to_parquet(cluster_keywords_path, index=False)
     print(f"Saved enriched data to {output_path} with row order preserved.")
+    print(f"Saved cluster TF-IDF keywords to {cluster_keywords_path}.")
 
     print(f"Created {MOCK_DATA_PATH} with {len(MOCK_ARXIV_RECORDS)} rows.")
     print(arxiv_df[["id", "title", "abstract_cleaned", "predicted_label"]])
@@ -203,4 +261,8 @@ def main(
 
 if __name__ == "__main__":
     # Select ("umap",), ("pacmap",), or ("umap", "pacmap").
-    main(("umap",), output_path="test-data-enriched.parquet")
+    main(
+        ("umap",),
+        output_path="test-data-enriched.parquet",
+        cluster_keywords_path="cluster-keywords.parquet",
+    )
