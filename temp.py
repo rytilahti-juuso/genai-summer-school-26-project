@@ -81,29 +81,43 @@ def add_clean_text_and_embeddings(df: pd.DataFrame) -> pd.DataFrame:
 def add_reduced_embeddings(
     df: pd.DataFrame,
     n_components: int,
+    reducer: ReducerName = "umap",
     source_column: str = "embedding",
     output_column: str = "reduced_embedding",
 ) -> pd.DataFrame:
-    """Apply UMAP to stored embeddings and save the reduced vectors."""
+    """Reduce stored embeddings with UMAP or PaCMAP and save the vectors."""
     result = df.copy()
     embeddings = np.vstack(result[source_column].to_numpy())
     n_samples, n_features = embeddings.shape
     maximum_components = min(n_samples - 2, n_features - 1)
 
+    if reducer not in ("umap", "pacmap"):
+        raise ValueError("Embedding reducer must be 'umap' or 'pacmap'.")
+
     if not 1 <= n_components <= maximum_components:
         raise ValueError(
-            "UMAP dimensions must be at least 1, lower than the original "
+            "Reduced dimensions must be at least 1, lower than the original "
             f"embedding size, and at least two below the sample count; received "
             f"{n_components}, maximum allowed is {maximum_components}."
         )
 
     n_neighbors = max(2, min(15, n_samples - 1))
-    reduced_embeddings = umap.UMAP(
-        n_components=n_components,
-        n_neighbors=n_neighbors,
-        metric="cosine",
-        random_state=RANDOM_STATE,
-    ).fit_transform(embeddings)
+    if reducer == "umap":
+        reduced_embeddings = umap.UMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            metric="cosine",
+            random_state=RANDOM_STATE,
+        ).fit_transform(embeddings)
+    else:
+        reduced_embeddings = pacmap.PaCMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            MN_ratio=0.5,
+            FP_ratio=1.0,
+            random_state=RANDOM_STATE,
+        ).fit_transform(embeddings)
+
     result[output_column] = [
         embedding.astype(float).tolist() for embedding in reduced_embeddings
     ]
@@ -375,6 +389,7 @@ def main(
     cluster_keywords_path: str = CLUSTER_KEYWORDS_PATH,
     interactive_plots_dir: str | Path = INTERACTIVE_PLOTS_DIR,
     embedding_reduction_dimensions: int | None = None,
+    embedding_reduction_method: ReducerName = "umap",
 ) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
@@ -393,10 +408,11 @@ def main(
         arxiv_df = add_reduced_embeddings(
             arxiv_df,
             n_components=embedding_reduction_dimensions,
+            reducer=embedding_reduction_method,
         )
         embedding_column = "reduced_embedding"
         print(
-            "Reduced embeddings with UMAP to "
+            f"Reduced embeddings with {embedding_reduction_method.upper()} to "
             f"{embedding_reduction_dimensions} dimensions."
         )
 
@@ -432,10 +448,12 @@ def main(
 if __name__ == "__main__":
     # Select ("umap",), ("pacmap",), or ("umap", "pacmap").
     # Set embedding_reduction_dimensions to an integer (for example, 50)
-    # to apply UMAP before clustering and visualization; use None to disable it.
+    # and choose embedding_reduction_method="umap" or "pacmap".
+    # Use embedding_reduction_dimensions=None to disable this preprocessing.
     main(
-        ("umap",),
+        ("umap", "pacmap"),
         output_path="test-data-enriched.parquet",
         cluster_keywords_path="cluster-keywords.parquet",
         embedding_reduction_dimensions=8,
+        embedding_reduction_method="pacmap",
     )
