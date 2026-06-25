@@ -33,14 +33,24 @@ def _find_enriched_file(folder: Path) -> Path:
     raise FileNotFoundError(f"Could not find {expected} in {folder}")
 
 
-def load_cluster_files(folder: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_cluster_files(
+    folder: str | Path,
+    enriched_filename: str | None = None,
+    keywords_filename: str = KEYWORDS_FILENAME,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load the enriched papers and cluster-keyword parquet files."""
     folder = Path(folder)
-    enriched_path = _find_enriched_file(folder)
-    keywords_path = folder / KEYWORDS_FILENAME
+    enriched_path = (
+        folder / enriched_filename
+        if enriched_filename is not None
+        else _find_enriched_file(folder)
+    )
+    keywords_path = folder / keywords_filename
 
+    if not enriched_path.is_file():
+        raise FileNotFoundError(f"Could not find {enriched_path.name} in {folder}")
     if not keywords_path.is_file():
-        raise FileNotFoundError(f"Could not find {KEYWORDS_FILENAME} in {folder}")
+        raise FileNotFoundError(f"Could not find {keywords_path.name} in {folder}")
 
     enriched_df = pd.read_parquet(enriched_path)
     keywords_df = pd.read_parquet(keywords_path)
@@ -118,6 +128,8 @@ def build_cluster_labeling_data(
     sample_count: int = 5,
     sampling_strategy: SamplingStrategy = "representative",
     random_seed: int = 42,
+    enriched_filename: str | None = None,
+    keywords_filename: str = KEYWORDS_FILENAME,
 ) -> tuple[pd.DataFrame, dict[int, dict[str, Any]], list[dict[str, Any]]]:
     """Build DataFrame, tuple dictionary, and structured LLM input records.
 
@@ -136,22 +148,30 @@ def build_cluster_labeling_data(
     if keyword_count < 1 or sample_count < 1:
         raise ValueError("keyword_count and sample_count must both be positive.")
 
-    enriched_df, keywords_df = load_cluster_files(folder)
+    enriched_df, keywords_df = load_cluster_files(
+        folder,
+        enriched_filename=enriched_filename,
+        keywords_filename=keywords_filename,
+    )
     ranked_keywords = (
         keywords_df.sort_values(["predicted_label", "rank"], kind="stable")
         .dropna(subset=["predicted_label", "word"])
         .groupby("predicted_label", sort=True)["word"]
         .apply(lambda words: list(dict.fromkeys(map(_clean_text, words)))[:keyword_count])
     )
+    cluster_labels = sorted(
+        int(label)
+        for label in enriched_df["predicted_label"].dropna().unique()
+    )
 
     rows: list[dict[str, Any]] = []
     cluster_dict: dict[int, dict[str, Any]] = {}
     llm_records: list[dict[str, Any]] = []
 
-    for raw_label, keywords in ranked_keywords.items():
-        cluster_id = int(raw_label)
+    for cluster_id in cluster_labels:
+        keywords = ranked_keywords.get(cluster_id, [])
         cluster_papers = enriched_df.loc[
-            enriched_df["predicted_label"].eq(raw_label),
+            enriched_df["predicted_label"].eq(cluster_id),
             ["title", "abstract"],
         ]
         examples_df = _choose_examples(
