@@ -5,7 +5,7 @@ import time
 from io import StringIO
 
 base_url = 'http://export.arxiv.org/api/query?';
-search_query = urllib.parse.quote("cat:cs.CY AND submittedDate=[20260101TO20260626]")
+search_query = urllib.parse.quote("cat:cs.CY submittedDate=[20260101TO20260626]")
 i = 0
 results_per_iteration = 1000
 wait_time = 5
