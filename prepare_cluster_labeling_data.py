@@ -86,7 +86,9 @@ def _choose_examples(
 
     if strategy == "representative":
         keyword_patterns = [
-            re.compile(rf"\b{re.escape(keyword.lower())}\b") for keyword in keywords
+            re.compile(
+                rf"(?<!\w){re.escape(keyword.lower())}(?!\w)"
+            ) for keyword in keywords
         ]
 
         def relevance(row: pd.Series) -> int:
