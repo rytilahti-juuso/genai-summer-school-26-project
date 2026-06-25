@@ -882,6 +882,6 @@ if __name__ == "__main__":
         cluster_keywords_path="final-data-cluster-keywords.parquet",
         embedding_reduction_dimensions=8,
         embedding_reduction_method="pacmap",
-        min_cluster_size=50,
-        min_samples=40,
+        min_cluster_size=30,
+        min_samples=15,
     )
