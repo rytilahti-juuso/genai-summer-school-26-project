@@ -15,6 +15,12 @@ import umap
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 import hdbscan
+from llm_connection import FALLBACK_LABEL, create_default_llm, label_clusters
+from prepare_cluster_labeling_data import (
+    SamplingStrategy,
+    build_cluster_labeling_data,
+    save_outputs as save_cluster_labeling_inputs,
+)
 
 MOCK_DATA_PATH = "test-data.parquet"
 REAL_DATA_PATH = "result*.parquet"
@@ -25,7 +31,6 @@ MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RANDOM_STATE = 42
 OLDER_OUTLIER_COLOR = "#B5485D"
 from mockUpData import MOCK_ARXIV_RECORDS
-print(len(MOCK_ARXIV_RECORDS))
 ReducerName = Literal["umap", "pacmap"]
 
 
@@ -428,6 +433,28 @@ def calculate_monthly_cluster_trends(
     return monthly_result, statistics_result
 
 
+def add_generated_labels(
+    df: pd.DataFrame,
+    labeling_results: Sequence[dict],
+) -> pd.DataFrame:
+    """Attach generated labels and combined cluster display names."""
+    result = df.copy()
+    labels = {
+        int(item["cluster_id"]): item.get("generated_label") or FALLBACK_LABEL
+        for item in labeling_results
+    }
+    result["generated_label"] = result["predicted_label"].map(labels).fillna(
+        FALLBACK_LABEL
+    )
+    result["cluster_display"] = result.apply(
+        lambda row: (
+            f"Cluster {int(row['predicted_label'])} — {row['generated_label']}"
+        ),
+        axis=1,
+    )
+    return result
+
+
 def create_cluster_trends_figure(
     monthly_trends: pd.DataFrame,
     growth_statistics: pd.DataFrame,
@@ -529,6 +556,18 @@ def save_cluster_trends(
     output_directory = Path(output_dir)
     output_directory.mkdir(parents=True, exist_ok=True)
     monthly_trends, growth_statistics = calculate_monthly_cluster_trends(df)
+    if not growth_statistics.empty and "generated_label" in df.columns:
+        generated_labels = (
+            df.loc[df["predicted_label"].ge(0)]
+            .drop_duplicates("predicted_label")
+            .set_index("predicted_label")["generated_label"]
+        )
+        growth_statistics["cluster"] = growth_statistics["predicted_label"].map(
+            lambda label: (
+                f"Cluster {int(label)} — "
+                f"{generated_labels.get(int(label), FALLBACK_LABEL)}"
+            )
+        )
     figure = create_cluster_trends_figure(
         monthly_trends,
         growth_statistics,
@@ -557,6 +596,7 @@ def save_interactive_reductions(
         "id": True,
         "published": True,
         "predicted_label": True,
+        "generated_label": True,
         "relative_timeline": ":.3f",
         "Dimension 1": ":.3f",
         "Dimension 2": ":.3f",
@@ -573,9 +613,7 @@ def save_interactive_reductions(
         plot_df["Dimension 1"] = coordinates[:, 0]
         plot_df["Dimension 2"] = coordinates[:, 1]
         # Treat cluster IDs as categories, including HDBSCAN's -1 noise label.
-        plot_df["cluster"] = plot_df["predicted_label"].map(
-            lambda label: "Noise" if label == -1 else f"Cluster {label}"
-        )
+        plot_df["cluster"] = plot_df["cluster_display"]
 
         cluster_figure = px.scatter(
             plot_df,
@@ -647,6 +685,65 @@ def save_interactive_reductions(
     return saved_paths
 
 
+def create_label_distribution_figure(df: pd.DataFrame) -> go.Figure:
+    """Create a bar chart of all cluster labels, including HDBSCAN noise."""
+    distribution = (
+        df.groupby(
+            ["predicted_label", "generated_label", "cluster_display"],
+            dropna=False,
+            sort=True,
+        )
+        .size()
+        .rename("item_count")
+        .reset_index()
+    )
+    distribution["percentage"] = 100 * distribution["item_count"] / len(df)
+    figure = px.bar(
+        distribution,
+        x="cluster_display",
+        y="item_count",
+        text=distribution["percentage"].map(lambda value: f"{value:.2f}%"),
+        custom_data=[
+            "predicted_label",
+            "generated_label",
+            "percentage",
+        ],
+        labels={
+            "cluster_display": "True cluster label and generated title",
+            "item_count": "Number of items",
+        },
+        title="Cluster label distribution",
+        template="plotly_white",
+    )
+    figure.update_traces(
+        hovertemplate=(
+            "<b>Cluster %{customdata[0]}</b><br>"
+            "Generated label: %{customdata[1]}<br>"
+            "Items: %{y}<br>"
+            "Distribution: %{customdata[2]:.2f}%<extra></extra>"
+        ),
+        textposition="outside",
+    )
+    figure.update_layout(xaxis_tickangle=-45, hoverlabel={"namelength": -1})
+    return figure
+
+
+def save_label_distribution(
+    df: pd.DataFrame,
+    output_dir: str | Path = INTERACTIVE_PLOTS_DIR,
+) -> Path:
+    output_directory = Path(output_dir)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output_path = output_directory / "label-distribution.html"
+    create_label_distribution_figure(df).write_html(
+        output_path,
+        include_plotlyjs=True,
+        full_html=True,
+        config={"displaylogo": False, "scrollZoom": True},
+    )
+    return output_path
+
+
 def main(
     reducer_names: Sequence[ReducerName],
     output_path: str = ENRICHED_DATA_PATH,
@@ -655,6 +752,11 @@ def main(
     embedding_reduction_method: ReducerName = "umap",
     min_cluster_size: int = 50,
     min_samples: int = 15,
+    generate_cluster_labels: bool = True,
+    labeling_keyword_count: int = 8,
+    labeling_sample_count: int = 5,
+    labeling_sampling_strategy: SamplingStrategy = "representative",
+    labeling_random_seed: int = 42,
 ) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
@@ -710,6 +812,46 @@ def main(
     )
     print(f"Saved cluster TF-IDF keywords to {keywords_output_path}.")
 
+    cluster_df, _, llm_records = build_cluster_labeling_data(
+        run_output_dir,
+        keyword_count=labeling_keyword_count,
+        sample_count=labeling_sample_count,
+        sampling_strategy=labeling_sampling_strategy,
+        random_seed=labeling_random_seed,
+        enriched_filename=enriched_output_path.name,
+        keywords_filename=keywords_output_path.name,
+    )
+    labeling_dataframe_path, labeling_records_path = save_cluster_labeling_inputs(
+        cluster_df,
+        llm_records,
+        run_output_dir,
+    )
+    print(f"Saved cluster labeling data to {labeling_dataframe_path}.")
+    print(f"Saved LLM input records to {labeling_records_path}.")
+
+    labeling_results: list[dict] = []
+    if generate_cluster_labels:
+        labeling_results_path = run_output_dir / "cluster-labeling-results.json"
+        try:
+            labeling_llm = create_default_llm()
+        except Exception as error:
+            labeling_llm = None
+            print(
+                "Could not initialize the LLM connection; saving fallback "
+                f"labels instead: {type(error).__name__}: {error}"
+            )
+        labeling_results = label_clusters(
+            labeling_llm,
+            llm_records,
+            checkpoint_path=labeling_results_path,
+            on_result=lambda item: print(
+                f"Cluster {item['cluster_id']}: {item['generated_label']}"
+            ),
+        )
+        print(f"Saved LLM labeling results to {labeling_results_path}.")
+
+    arxiv_df = add_generated_labels(arxiv_df, labeling_results)
+
     print(f"Created {MOCK_DATA_PATH} with {len(MOCK_ARXIV_RECORDS)} rows.")
     print(arxiv_df[["id", "title", "abstract_cleaned", "predicted_label"]])
 
@@ -724,6 +866,7 @@ def main(
             output_dir=run_output_dir,
         )
     )
+    plot_paths.append(save_label_distribution(arxiv_df, run_output_dir))
     for plot_path in plot_paths:
         print(f"Saved interactive plot to {plot_path}.")
 
@@ -739,6 +882,6 @@ if __name__ == "__main__":
         cluster_keywords_path="final-data-cluster-keywords.parquet",
         embedding_reduction_dimensions=8,
         embedding_reduction_method="pacmap",
-        min_cluster_size=50,
-        min_samples=15,
+        min_cluster_size=70,
+        min_samples=1,
     )
