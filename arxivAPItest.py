@@ -9,11 +9,9 @@ search_query = urllib.parse.quote("cat:cs.CY AND submittedDate=[20260101TO202606
 i = 0
 results_per_iteration = 1000
 wait_time = 5
-papers = []
-year = ""  
 print('Searching arXiv for %s' % search_query)
 
-while (year != "2025"): #stop requesting when papers date reach
+while (i < 10000): #stop requesting when reaching 10000 papers
    print("Results %i - %i" % (i,i+results_per_iteration))
     
    query = 'search_query=%s&start=%i&max_results=%i&sortBy=submittedDate&sortOrder=descending' % (search_query, i,results_per_iteration)
