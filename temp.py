@@ -167,11 +167,16 @@ def fit_reducers(
     return reductions
 
 
-def cluster_embeddings(embeddings: np.ndarray) -> np.ndarray:
+def cluster_embeddings(
+    embeddings: np.ndarray,
+    min_cluster_size: int,
+    min_samples: int,
+) -> np.ndarray:
     """Cluster embeddings with HDBSCAN."""
-    # min_cluster_size = 2 if len(embeddings) < 10 else 5
-    min_cluster_size = 350
-    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=None)
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+    )
     return clusterer.fit_predict(embeddings)
 
 
@@ -225,13 +230,19 @@ def relative_timeline(df: pd.DataFrame) -> pd.Series:
 def add_predictions(
     df: pd.DataFrame,
     reductions: dict[str, np.ndarray],
+    min_cluster_size: int,
+    min_samples: int,
     embedding_column: str = "embedding",
 ) -> pd.DataFrame:
     """Add labels, timeline, and reducer coordinates without changing row order."""
     result = df.copy()
     embeddings = np.vstack(result[embedding_column].to_numpy())
 
-    result["predicted_label"] = cluster_embeddings(embeddings)
+    result["predicted_label"] = cluster_embeddings(
+        embeddings,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+    )
     timeline_metadata = publication_timeline_metadata(result)
     for column in timeline_metadata.columns:
         result[column] = timeline_metadata[column].to_numpy()
@@ -640,12 +651,20 @@ def main(
     reducer_names: Sequence[ReducerName],
     output_path: str = ENRICHED_DATA_PATH,
     cluster_keywords_path: str = CLUSTER_KEYWORDS_PATH,
-    interactive_plots_dir: str | Path = INTERACTIVE_PLOTS_DIR,
     embedding_reduction_dimensions: int | None = None,
     embedding_reduction_method: ReducerName = "umap",
+    min_cluster_size: int = 50,
+    min_samples: int = 15,
 ) -> None:
     if not reducer_names:
         raise ValueError("Select at least one reducer: 'umap' or 'pacmap'.")
+
+    run_output_dir = Path(
+        f"run-with-min-cluster-size-{min_cluster_size}-and-min-samples{min_samples}"
+    )
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+    enriched_output_path = run_output_dir / Path(output_path).name
+    keywords_output_path = run_output_dir / Path(cluster_keywords_path).name
 
     # create_mock_parquet(MOCK_DATA_PATH)
     print("start")
@@ -674,6 +693,8 @@ def main(
     arxiv_df = add_predictions(
         arxiv_df,
         reductions,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
         embedding_column=embedding_column,
     )
     cluster_keywords_df = extract_cluster_keywords(arxiv_df)
@@ -681,10 +702,13 @@ def main(
     if arxiv_df["id"].tolist() != original_id_order:
         raise RuntimeError("Row order changed while enriching the data.")
 
-    arxiv_df.to_parquet(output_path, index=False)
-    cluster_keywords_df.to_parquet(cluster_keywords_path, index=False)
-    print(f"Saved enriched data to {output_path} with row order preserved.")
-    print(f"Saved cluster TF-IDF keywords to {cluster_keywords_path}.")
+    arxiv_df.to_parquet(enriched_output_path, index=False)
+    cluster_keywords_df.to_parquet(keywords_output_path, index=False)
+    print(
+        f"Saved enriched data to {enriched_output_path} "
+        "with row order preserved."
+    )
+    print(f"Saved cluster TF-IDF keywords to {keywords_output_path}.")
 
     print(f"Created {MOCK_DATA_PATH} with {len(MOCK_ARXIV_RECORDS)} rows.")
     print(arxiv_df[["id", "title", "abstract_cleaned", "predicted_label"]])
@@ -692,12 +716,12 @@ def main(
     plot_paths = save_interactive_reductions(
         arxiv_df,
         reductions,
-        output_dir=interactive_plots_dir,
+        output_dir=run_output_dir,
     )
     plot_paths.append(
         save_cluster_trends(
             arxiv_df,
-            output_dir=interactive_plots_dir,
+            output_dir=run_output_dir,
         )
     )
     for plot_path in plot_paths:
@@ -715,4 +739,6 @@ if __name__ == "__main__":
         cluster_keywords_path="final-data-cluster-keywords.parquet",
         embedding_reduction_dimensions=8,
         embedding_reduction_method="pacmap",
+        min_cluster_size=50,
+        min_samples=15,
     )
