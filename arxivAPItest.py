@@ -5,7 +5,7 @@ import time
 from io import StringIO
 
 base_url = 'http://export.arxiv.org/api/query?';
-search_query = urllib.parse.quote("ti:computers and society")
+search_query = urllib.parse.quote("cat:cs.CY")
 i = 0
 results_per_iteration = 1000
 wait_time = 5
@@ -29,17 +29,3 @@ while (year != "2025"): #stop requesting when papers date reach 2018
 
 
 
-"""
-search_terms = 'all:computer-science-'+'-AND-'+'2026-01'
-url = f'http://export.arxiv.org/api/query?search_query={search_terms}&start=0&max_results=1000'
-data = urllib.request.urlopen(url)
-
-df = pd.read_xml(StringIO(result))
-df.to_parquet("result.parquet")
-pd.read_parquet("result.parquet")
-
-
-print(result)
-
-print(pd.read_parquet)
-"""
