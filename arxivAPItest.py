@@ -5,7 +5,7 @@ import time
 from io import StringIO
 
 base_url = 'http://export.arxiv.org/api/query?';
-search_query = urllib.parse.quote("cat:cs.CY")
+search_query = urllib.parse.quote("cat:cs.CY AND submittedDate=[20260101TO20260626]")
 i = 0
 results_per_iteration = 1000
 wait_time = 5
@@ -13,7 +13,7 @@ papers = []
 year = ""  
 print('Searching arXiv for %s' % search_query)
 
-while (year != "2025"): #stop requesting when papers date reach 2018
+while (year != "2025"): #stop requesting when papers date reach
    print("Results %i - %i" % (i,i+results_per_iteration))
     
    query = 'search_query=%s&start=%i&max_results=%i&sortBy=submittedDate&sortOrder=descending' % (search_query, i,results_per_iteration)
