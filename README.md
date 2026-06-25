@@ -1,6 +1,6 @@
 # README
 
-- first run data fetching script.
+- first run data fetching script arxivAPItest.py
 - then run temp.py to generate the interactive charts and the data files.
 - Move the data files into a correct folder¨
 - run the 
