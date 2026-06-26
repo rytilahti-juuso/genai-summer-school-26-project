@@ -30,6 +30,7 @@ INTERACTIVE_PLOTS_DIR = "interactive-plots"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RANDOM_STATE = 42
 OLDER_OUTLIER_COLOR = "#B5485D"
+NOISE_POINT_COLOR = "#6B7280"
 from mockUpData import MOCK_ARXIV_RECORDS
 ReducerName = Literal["umap", "pacmap"]
 
@@ -614,6 +615,7 @@ def save_interactive_reductions(
         plot_df["Dimension 2"] = coordinates[:, 1]
         # Treat cluster IDs as categories, including HDBSCAN's -1 noise label.
         plot_df["cluster"] = plot_df["cluster_display"]
+        plot_df["is_noise"] = plot_df["predicted_label"].lt(0)
 
         cluster_figure = px.scatter(
             plot_df,
@@ -628,8 +630,11 @@ def save_interactive_reductions(
         )
         cluster_figure.update_traces(marker={"size": 10, "opacity": 0.82})
 
+        timeline_points = plot_df.loc[
+            ~plot_df["is_noise"] & ~plot_df["timeline_outlier"]
+        ]
         timeline_figure = px.scatter(
-            plot_df.loc[~plot_df["timeline_outlier"]],
+            timeline_points,
             x="Dimension 1",
             y="Dimension 2",
             color="relative_timeline",
@@ -646,7 +651,9 @@ def save_interactive_reductions(
         )
         timeline_figure.update_traces(marker={"size": 10, "opacity": 0.82})
 
-        older_outliers = plot_df.loc[plot_df["timeline_outlier"]]
+        older_outliers = plot_df.loc[
+            ~plot_df["is_noise"] & plot_df["timeline_outlier"]
+        ]
         if not older_outliers.empty:
             outlier_figure = px.scatter(
                 older_outliers,
@@ -667,6 +674,47 @@ def save_interactive_reductions(
                 showlegend=True,
             )
             timeline_figure.add_traces(outlier_figure.data)
+
+        noise_points = plot_df.loc[plot_df["is_noise"]]
+        if not noise_points.empty:
+            noise_figure = px.scatter(
+                noise_points,
+                x="Dimension 1",
+                y="Dimension 2",
+                hover_name="title",
+                hover_data=timeline_hover_data,
+                labels={"timeline_status": "Timeline status"},
+            )
+            noise_figure.update_traces(
+                marker={
+                    "size": 10,
+                    "opacity": 0.72,
+                    "color": NOISE_POINT_COLOR,
+                    "symbol": "x",
+                    "line": {"color": "white", "width": 0.7},
+                },
+                name="Noise (excluded from timeline gradient)",
+                showlegend=True,
+            )
+            timeline_figure.add_traces(noise_figure.data)
+            timeline_figure.add_annotation(
+                text=(
+                    f"Noise excluded from timeline gradient: "
+                    f"{len(noise_points)} points"
+                ),
+                x=1,
+                y=1.05,
+                xref="paper",
+                yref="paper",
+                xanchor="right",
+                yanchor="bottom",
+                showarrow=False,
+                font={"size": 12, "color": NOISE_POINT_COLOR},
+                bgcolor="rgba(255,255,255,0.82)",
+                bordercolor=NOISE_POINT_COLOR,
+                borderwidth=1,
+                borderpad=4,
+            )
 
         for suffix, figure in (
             ("clusters", cluster_figure),
