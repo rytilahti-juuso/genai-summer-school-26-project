@@ -3,12 +3,12 @@
 - first run data fetching script arxivAPItest.py
 - then run temp.py to generate the interactive charts and the data files.
 - Move the data files into a correct folder¨
-- run the 
+- run the prepare_cluster_labeling_data.py
 
 # Other notes:
 
 - The folder names are min-cluster size (so not clusters, but min cluster size), with min sample size set to none.
-
+- Original from here https://intelligent-systems.net/school/project-detail.php?id=1 
 # TODO
 
 - Change the data fetch script so that it fetches newest 10k of abstracts, and then on later invocations 
